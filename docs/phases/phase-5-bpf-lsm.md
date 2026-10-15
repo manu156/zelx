@@ -1,184 +1,106 @@
-# Phase 5 — BPF-LSM Deep Hooks
+# Phase 5 — BPF-LSM Policy Enforcement
 
-**Status:** `[ ] Not started`
+**Status:** `[ ] Not started — feasibility prototypes required`
 **Depends on:** Phase 4
-**Goal:** Replace fanotify with BPF-LSM for deeper, lower-overhead security hooks.
+**Goal:** Add kernel policy enforcement and auditing while retaining proven
+synchronous permission brokers.
 
----
+## Scope
 
-## Objective
+`FAN_OPEN_PERM` gates supported file opens, including `openat`/`openat2` paths that
+reach the same filesystem hooks. It does not gate every filesystem operation,
+network access, process signaling, or IPC. BPF-LSM can cover additional LSM hooks
+and apply already established policy inside the kernel.
 
-`fanotify` has fundamental limitations:
-- Only covers `open()` — not `openat2()` variants in all cases
-- Cannot intercept `socket()` at creation time (only `connect()` via seccomp)
-- Cannot intercept `kill()` for process isolation
-- Cannot intercept IPC (D-Bus, PipeWire, Binder-equivalent)
+BPF-LSM is available from Linux 5.7 where enabled, but each required hook, helper,
+map, and attachment mode must be probed. A kernel version alone does not establish
+that a proposed synchronous prompt mechanism exists. The user-space loader stays
+Rust; BPF programs may use the toolchain appropriate to the kernel ABI.
 
-**BPF-LSM** (Linux Security Module via eBPF, kernel 5.7+) attaches programs to
-LSM hook points — the same hooks SELinux and AppArmor use — but as eBPF bytecode
-loaded at runtime via `libbpf`. No kernel module. No reboot.
+## Permission transport remains explicit
 
-This phase replaces the fanotify loop with BPF-LSM programs for file access, and
-adds socket-level and process-level interception.
+`BPF_F_SLEEPABLE` allows supported helpers/kfuncs that may sleep in allowed hook
+contexts. It does **not** itself provide a wait-for-userspace permission primitive.
+There is no implemented `zelx_wait_for_decision()` API in Zelx. See
+[kernel kfunc documentation](https://kernel.org/doc/html/latest/bpf/kfuncs.html)
+and [LSM BPF programs](https://docs.kernel.org/bpf/prog_lsm.html).
 
----
+Keep fanotify for interactive filesystem decisions and seccomp notification for
+the selected network/syscall decisions. Do not replace either solely because a
+kernel supports sleepable BPF. Any future replacement needs a runnable prototype
+showing request transport, correlation, bounded waits, cancellation, revocation,
+and behavior under broker failure before its architecture can be accepted.
 
-## New LSM Hook Points
+For an operation without an applicable synchronous broker, an unknown policy must
+deny. It may emit a bounded notification so that a later user-approved retry can
+succeed. Never allow an unknown access merely to populate a policy cache: one
+successful credential read or connection can be enough for an attack.
 
-| Hook | syscall intercepted | New capability |
+## Hook plan
+
+| LSM hook | Intended role | Unknown-policy behavior |
 |---|---|---|
-| `security_file_open` | `open()`, `openat()`, all variants | Replace fanotify (more complete) |
-| `security_socket_connect` | `connect()` | Replace seccomp hook for network |
-| `security_socket_create` | `socket()` | Block raw socket creation |
-| `security_task_kill` | `kill()`, `tgkill()` | Process isolation (stop signal injection) |
-| `security_inode_rename` | `rename()` | Audit file moves |
-| `security_ptrace_access_check` | `ptrace()` | Block debug-attach to other apps |
+| `file_open` | Enforce established file policy, complement fanotify | Continue to the active fanotify gate only when its coverage is guaranteed; otherwise deny |
+| `socket_connect` / `socket_create` | Enforce destination/socket policy | Retain the applicable seccomp broker; otherwise deny |
+| `task_kill` | Apply registered instance boundaries | Deny cross-instance operations lacking a grant |
+| `ptrace_access_check` | Restrict process injection/debugging | Deny unless explicitly authorized |
+| `inode_rename` and other selected hooks | Enforce/audit operations fanotify does not gate | Deny protected operations lacking established policy |
 
----
+These are LSM attachment names, not invented helper APIs. An LSM return of zero
+continues kernel processing; it does not itself send an interactive request or
+skip a remaining fanotify check. Preserve denial from any preceding LSM program.
 
-## BPF-LSM Architecture
+## Kernel policy and audit design
 
-The user-space loader remains Rust (RFC-005); the C below is a kernel BPF
-program sketch, not a return to C for the daemon.
+- Use the privileged Phase 2 registry to bind cgroup identities to app instances.
+  User-controlled cgroup names or application metadata cannot establish trust.
+- Define complete policy keys and filesystem identity/namespace semantics before
+  implementing the cache. A path hash alone is not a permission key: collisions,
+  rename, hard links, and namespace aliases must not transfer grants.
+- Publish policy generations and specify revocation ordering across SQLite,
+  userspace caches, and BPF maps. A revoke is not acknowledged as complete while
+  a backend may still apply an older allow.
+- Bound maps, notifications, and outstanding requests. Cache eviction, unknown
+  policy, notification loss, and unavailable brokers must never synthesize an
+  allow in enforcement mode.
+- Correlate BPF and broker events so an early BPF denial is audited and accesses
+  passing both mechanisms are not misleadingly counted twice. Ring-buffer
+  submission alone neither blocks an access nor guarantees a durable audit row.
+- Test hook ordering and failure behavior with other LSM policies enabled.
 
-### eBPF program structure
+## Media integration
 
-```c
-// zelx_lsm.bpf.c — loaded by zelxd via libbpf
-#include <vmlinux.h>
-#include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
+PipeWire/WirePlumber integration remains a separate authorization broker project.
+Select a supported version/API and prototype asynchronous authorization without
+blocking its event loop. Authenticate the actual client's registered instance;
+do not trust an app-supplied cgroup property. Direct ALSA/V4L2 device access also
+needs filesystem/device policy; not all recording goes through PipeWire.
 
-// Ring buffer for events to zelxd userspace
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 4 * 1024 * 1024);
-} events SEC(".maps");
+## Transition and validation
 
-// Map of exempted cgroup IDs (zelxd, overlay, compositor)
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 64);
-    __type(key, u64);    // cgroup id
-    __type(value, u8);   // 1 = exempt
-} exempt_cgroups SEC(".maps");
+1. Prototype the required hook attachments and policy decisions on supported
+   kernels, including coexistence with fanotify and seccomp notification.
+2. Establish policy identity, generation/revocation, and audit correlation.
+3. Add enforcement incrementally; keep the existing brokers active.
+4. Benchmark complete cache-hit and prompt paths, queue saturation, and tail
+   latency. Prior microsecond figures are targets, not measured guarantees.
+5. Consider retiring a broker only after an equivalent mechanism passes its
+   coverage, timeout, shutdown, crash, and revocation tests.
 
-// Map of cached policy decisions (hot path cache)
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 4096);
-    __type(key, struct policy_key);    // {cgroup_id, path_hash}
-    __type(value, u8);                 // ALLOW=1, DENY=0
-} policy_cache SEC(".maps");
+## Acceptance criteria
 
-SEC("lsm/file_open")
-int BPF_PROG(zelx_file_open, struct file *file, int mask) {
-    u64 cgid = bpf_get_current_cgroup_id();
+- [ ] Required hooks and helpers are detected; unsupported combinations fail
+  clearly or use an explicitly supported broker.
+- [ ] No unknown/evicted policy grants access without the applicable broker.
+- [ ] Protected operations without a broker deny, including notification loss.
+- [ ] Trusted instance mappings and complete cache keys resist impersonation.
+- [ ] Revocations invalidate every active backend before completion is reported.
+- [ ] Prior LSM denials remain effective and audit correlation is verified.
+- [ ] Signaling and ptrace rules separate app instances as specified.
+- [ ] Media authorization uses authenticated client identity and tested APIs.
+- [ ] Measured performance supports any claims of reduced overhead.
 
-    // Check exemptions
-    if (bpf_map_lookup_elem(&exempt_cgroups, &cgid))
-        return 0;  // allow
-
-    // Check policy cache (fast path)
-    // ...
-
-    // Send event to userspace ring buffer for slow path (prompt)
-    struct zelx_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (e) {
-        e->type = ZELX_EVENT_FILE_OPEN;
-        e->cgroup_id = cgid;
-        e->pid = bpf_get_current_pid_tgid() >> 32;
-        bpf_probe_read_kernel_str(e->path, sizeof(e->path),
-                                  file->f_path.dentry->d_name.name);
-        bpf_ringbuf_submit(e, 0);
-    }
-
-    // Block until zelxd updates the policy cache
-    // (Sleepable BPF: BPF_F_SLEEPABLE — requires kernel 5.11+)
-    return zelx_wait_for_decision(cgid, file);
-}
-```
-
-### Sleepable BPF for synchronous blocking
-
-`BPF_F_SLEEPABLE` programs (kernel 5.11+) can sleep and wait for a condition.
-This allows the BPF program itself to block the syscall while zelxd processes
-the request — cleaner than the fanotify fd approach.
-
-If sleepable BPF is unavailable, fall back to: return `0` (allow) and log the
-event; `zelxd` uses the policy cache for the next access to the same path.
-(One-open gap — acceptable in the BPF path because the cache miss window is tiny.)
-
----
-
-## PipeWire / WirePlumber Integration (zelx-wire)
-
-Microphone and camera access goes through PipeWire, not via `open()` on a device
-node. Gate it with a WirePlumber script plugin:
-
-```lua
--- zelx-wire.lua (WirePlumber Lua plugin)
--- Intercepts all node link requests to audio/video source nodes
--- Sends a D-Bus message to zelxd before approving the link
-
-local zelxd = require("zelxd")
-
-SimpleEventHook {
-  name = "zelx-wire/check-link",
-  interests = { EventInterest { Constraint { "event.type", "=", "create-link" } } },
-  execute = function(event)
-    local target = event:get_subject()
-    local client_node = target:get_connected_peer()
-    local cgroup = client_node:get_property("application.process.cgroup")
-
-    if not zelxd.check_permission(cgroup, "microphone", target:get_name()) then
-      event:set_step_code(Si.StepCode.None)  -- reject the link
-    end
-  end
-}:register()
-```
-
----
-
-## Performance Comparison
-
-| Mechanism | Overhead per syscall | Limitations |
-|---|---|---|
-| `fanotify FAN_OPEN_PERM` | ~50–200µs (round-trip to userspace) | File open only |
-| `seccomp_unotify` | ~100–300µs | Manual arg parsing |
-| `BPF-LSM` (policy cache hit) | ~1–5µs (in-kernel) | Requires kernel 5.7+ |
-| `BPF-LSM` (cache miss → prompt) | ~50–200ms (user prompt) | — |
-
-The BPF policy cache means **repeated accesses to already-decided paths are
-essentially free**. Only new/uncached paths pay the round-trip cost.
-
----
-
-## Transition from fanotify
-
-Phase 5 replaces the Phase 0 fanotify loop:
-1. Load BPF-LSM programs via `libbpf` at `zelxd` startup
-2. Read ring buffer events instead of `fanotify` fd events
-3. Keep fanotify as a **fallback** if kernel < 5.11 (no sleepable BPF)
-
-The policy engine and SQLite audit code are unchanged.
-
----
-
-## Success Criteria
-
-- [ ] BPF-LSM program loads without errors on kernel 5.11+
-- [ ] File access interception is functionally equivalent to Phase 0–3 behavior
-- [ ] `security_task_kill` hook prevents `kill -9` from one zelx app to another
-- [ ] Microphone grant/deny works via WirePlumber plugin
-- [ ] Policy cache measurably reduces repeat-access overhead (benchmark)
-- [ ] Graceful fallback to fanotify on older kernels
-
----
-
-## Requirements
-
-- Linux kernel ≥ 5.11 (sleepable BPF-LSM) — or 5.7 for non-sleepable
-- `CONFIG_BPF_LSM=y`, `CONFIG_DEBUG_INFO_BTF=y` in kernel config
-- `libbpf` ≥ 0.8
-- WirePlumber ≥ 0.4 (Lua scripting API)
+Requirements include BPF-LSM/BTF support, active BPF LSM configuration, and the
+specific helpers/attachment modes validated by the prototypes. Pin loader and
+media API requirements after those prototypes; a blanket Linux 5.11 or
+WirePlumber 0.4 requirement does not prove this design works.

@@ -58,7 +58,7 @@ Zelx operates across four native layers of the Linux stack:
 | Component | Layer | Responsibility |
 |---|---|---|
 | **Kernel Hooks** | Kernel (`fanotify` + BPF-LSM) | Intercepts `security_file_open`, `security_socket_connect`, and `openat` calls synchronously without VFS deadlocks. |
-| **`zelxd`** | Core Policy & Audit Daemon | Tracks unspoofable app identity via cgroup v2 slices, evaluates saved policy rules, and writes telemetry to SQLite. |
+| **`zelxd`** | Core Policy & Audit Daemon | Plans a privileged launch registry backed by protected cgroup v2 membership; evaluates policy and writes audit records to SQLite. |
 | **`zelx-wire`** | Media & IPC Broker | Hooks into PipeWire / WirePlumber and Hyprland IPC to gate microphone, camera, and compositor control. |
 | **`zelx-overlay` & `zelxctl`** | Wayland UI & CLI | Renders clickjack-proof permission prompts on the Wayland overlay layer and provides a CLI/TUI privacy dashboard. |
 
@@ -81,13 +81,13 @@ See [RFC-005](./docs/rfc/RFC-005-rust-runtime.md) for the design.
 
 - [x] **Phase 0 — fanotify Audit:** Synchronous filesystem interception and live audit logging.
 - [x] **Phase 1 — Runtime Permissions:** Policy engine with allow/deny rules and CLI prompts.
-- [ ] **Phase 2 — App Identity:** Track child processes via cgroup v2 app slices.
+- [ ] **Phase 2 — App Identity:** Bind approved launches and descendants to a privileged cgroup registry.
 - [ ] **Phase 3 — Wayland Overlay:** Native `wlr-layer-shell` Hyprland permission dialog.
 - [ ] **Phase 4 — Network & Syscall:** `seccomp_unotify` for network, clipboard, and screen capture gating.
-- [ ] **Phase 5 — BPF-LSM:** Sleepable `BPF_PROG_TYPE_LSM` for deep hooks + WirePlumber plugin.
+- [ ] **Phase 5 — BPF-LSM:** Add established-policy hooks; retain synchronous brokers and prototype media authorization.
 - [ ] **Phase 6 — Full Isolation:** Namespace-based sandboxing (mount, net, pid, ipc) — Android-equivalent isolation.
 
-Phases 0–1 are implemented; privileged kernel validation is pending. See
+Phases 0–1 are implemented and their baseline real-kernel suite has passed. See
 [`docs/runtime.md`](./docs/runtime.md) for build, usage, tests, and current limits,
 and [`docs/phases/`](./docs/phases/) for the plans and acceptance criteria.
 

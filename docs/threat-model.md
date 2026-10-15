@@ -102,4 +102,4 @@ When fully deployed, an app launched via `zelx-run` has the following guarantees
 | **IPC isolation** | Cannot speak to Hyprland IPC, D-Bus system services, or PipeWire without grant |
 | **Audit completeness** | Every resource access (allowed or denied) is logged with millisecond timestamp and app identity |
 | **Tamper resistance** | Audit log is append-only; app cannot write to zelxd's SQLite file |
-| **Identity stability** | cgroup v2 slice is unforgeable; child processes inherit identity automatically |
+| **Identity stability** | Privileged launch registration binds protected cgroup membership to verified app instances; children inherit membership. Delegated/user-named groups are not trusted identities. |

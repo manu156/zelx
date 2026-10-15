@@ -1,70 +1,70 @@
-# RFC-001 — App Identity: cgroup v2 vs UID vs PID
+# RFC-001 — App Identity and cgroup v2
 
-**Status:** `Accepted`
-**Decision:** cgroup v2 slice path is the canonical app identity.
+**Status:** Accepted direction; privileged launch protocol and registration design pending.
+**Decision:** A privileged registry binds approved launches to kernel cgroup identities.
+Cgroup path strings and process names are never proof of application identity.
 
----
+## Requirements
 
-## Problem
+An identity must survive fork, distinguish users and concurrent instances, and
+prevent a caller from borrowing a different app's saved grants. Stable policy
+keys must come from approved launch registrations, not from caller-selected
+command basenames.
 
-Every security decision in Zelx is tied to an app identity. The identity must be:
-- **Stable** — doesn't change as the app spawns children
-- **Unforgeable** — a malicious app cannot claim a different identity
-- **Unique** — two different apps cannot share an identity
-- **Persistent** — the same app across multiple launches maps to the same policy bucket
+## Alternatives
 
-## Options Considered
+| Mechanism | Assessment |
+|---|---|
+| PID/comm | Useful Phase 0–1 metadata; PID reuse and mutable comm names prevent trusted app identity |
+| UID per app | Stronger separation, but changes filesystem access and desktop integration; deferred |
+| Privileged cgroup registry | Groups descendants without assigning per-app UIDs; selected, subject to launch authorization and protected membership |
 
-### Option A: PID
-**Rejected.**
-- PIDs are reused after process exit
-- Each child process gets a new PID — all CLI tools inside a terminal appear as separate apps
-- Trivially forgeable (a process cannot change its own PID, but children are new)
+## Trust boundary
 
-### Option B: UID per app (Android-style)
-**Rejected for MVP; possible long-term.**
-- Requires creating a new user account per app — requires root and system-level setup
-- Existing apps are not built to run as arbitrary UIDs
-- `$HOME` and XDG paths break (Discord expects to find config at `~/.config/discord`, which is owned by the user UID)
-- Would require full bind-mount namespace (Phase 6) to work correctly anyway
-- Complex to administer
+The privileged launch service owns the Zelx subtree, instance registry, and launch
+registrations. The unprivileged frontend submits a launch request over an
+authenticated local protocol. The service verifies the registered executable and
+launch constraints, starts the child in a protected cgroup, registers the
+instance before exec, and runs application code with the caller's credentials.
+It must not attach arbitrary caller-supplied PIDs to an existing trusted group.
 
-### Option C: cgroup v2 slice (chosen)
-**Accepted.**
+Kernel cgroup membership is inherited on fork, but migration is controlled by
+filesystem permissions and delegation rules. `CAP_SYS_ADMIN` is **not** a
+universal prerequisite for migration. Applications must have no writable route
+through membership files or delegated ancestors to acquire another identity.
+The user systemd manager and `Delegate=yes` scopes are not trusted authorities
+against applications with that same UID. See
+[cgroup v2 delegation](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).
 
-```
-/sys/fs/cgroup/zelx.slice/zelx-discord-a3f2b1c8.scope/
-```
+## Registry mapping
 
-**Why this works:**
-- `fork()` inherits the cgroup automatically — all children are in the same slice
-- Requires `CAP_SYS_ADMIN` to escape — unforgeable in practice
-- `zelxd` reads `/proc/<pid>/cgroup` to resolve any PID to its app identity
-- Two launches of the same app get different UUIDs but the same base name (`discord`) → same policy rules
-- Works on any kernel ≥ 4.5 with cgroup v2
-
-**Policy key derivation:**
-```
-cgroup path:  zelx-discord-a3f2b1c8.scope
-policy key:   discord                         (strip "zelx-" prefix and UUID suffix)
-audit key:    discord-a3f2b1c8               (include UUID for instance tracking)
+```text
+kernel cgroup identity -> {owner_uid, registered_policy_id, instance_id}
+policy key            -> (owner_uid, registered_policy_id)
+audit identity        -> instance_id plus display/executable metadata
 ```
 
-## Implementation Notes
+The path `/zelx.slice/zelx-<instance>.scope` is a diagnostic label. Parsing a
+basename, checking a `zelx-` prefix, or stripping a UUID does not authenticate it.
+Verify membership against the live registry. Guard process lookups with pidfds
+or equivalent lifetime validation, and invalidate caches on exit or
+service-controlled moves. `cgroup.events` tracks group emptiness;
+`FAN_EVENT_ON_CHILD` does not report process exit.
 
-- `zelxd` should maintain an in-memory `pid → cgroup_id` cache to avoid
-  hitting `/proc/<pid>/cgroup` on every event (hot path optimization)
-- The cache must be invalidated on process exit (use `fanotify` `FAN_EVENT_ON_CHILD`
-  or a `pidfd` poll to detect exit)
-- `zelx-run` creates the cgroup before `exec()` so the app never runs outside it
+Unknown groups map to `__unmanaged__`, with no app-specific grants inherited from
+the displayed process name. Children of a registered terminal share its policy;
+terminal trust selection remains an explicit design decision in RFC-003.
 
-## Open Questions
+## Limits and acceptance
 
-- **Q: What about apps not launched via `zelx-run`?**
-  A: They fall into the default cgroup and get a policy key of `__unmanaged__`.
-  Phase 6 may block `__unmanaged__` apps from accessing protected paths entirely.
+Cgroup membership does not authenticate the code later loaded by a process.
+Registration must define executable updates, user-writable scripts/interpreters,
+loader environment, and launch constraints. Same-UID ptrace and process injection
+remain limitations until isolation addresses them. Root is trusted and can
+reconfigure the system.
 
-- **Q: Can a malicious app write to `/sys/fs/cgroup/` to move itself?**
-  A: Only if it has `CAP_SYS_ADMIN`. Zelx drops this capability (Phase 6). Even
-  before Phase 6, writing to `cgroup.procs` requires write permission on the target
-  cgroup directory, which is owned by root.
+[Phase 2](../phases/phase-2-cgroup-identity.md) defines required negative tests for
+forged labels, executable substitution, arbitrary PID attachment, delegation,
+reuse, and launch ordering. Do not claim unforgeable app identity until that
+protocol and its limits have been validated. Current Phase 0–1 comm policy keys
+are unchanged by this RFC.

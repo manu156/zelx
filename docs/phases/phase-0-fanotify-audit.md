@@ -1,6 +1,7 @@
 # Phase 0 — fanotify Intercept & Audit Logging
 
-**Status:** Rust implementation — privileged kernel acceptance testing pending.
+**Status:** Rust implementation — baseline real-kernel regression suite passed;
+manual desktop smoke checks below remain separate.
 See the [runtime guide](../runtime.md) for usage, validation results, and limits.
 **Goal:** Prove the kernel interception chain is real and shippable.
 

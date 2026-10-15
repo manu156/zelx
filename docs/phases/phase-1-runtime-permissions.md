@@ -1,6 +1,7 @@
 # Phase 1 — Runtime Permissions (CLI Prompt)
 
-**Status:** Rust implementation — privileged kernel acceptance testing pending.
+**Status:** Rust implementation — baseline real-kernel regression suite passed;
+manual desktop smoke checks below remain separate.
 See the [runtime guide](../runtime.md) for usage, validation results, and limits.
 **Depends on:** Phase 0
 **Goal:** Block unauthorized access and ask the user before allowing.
@@ -98,7 +99,7 @@ zelxctl policy import zelx-policy.json     # restore
 ## Success Criteria
 
 - [ ] `zelx-run discord` triggers a prompt when Discord first reads `~/.config`
-- [ ] Choosing "Allow always" prevents future prompts for that path glob
+- [ ] Choosing "Allow always" prevents future prompts for that exact path
 - [ ] Choosing "Deny" causes Discord's `open()` to return `EPERM` (fanotify `FAN_DENY`)
 - [x] Session rules expire when `zelxd` restarts (simulated runtime test)
 - [x] `zelxctl policy list discord` shows saved permanent rules (CLI tests)

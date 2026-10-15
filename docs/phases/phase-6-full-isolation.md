@@ -149,7 +149,9 @@ BPF-LSM: (never reached — namespace prevented it)
 BPF-LSM remains essential for:
 - Protecting against namespace escape attempts
 - Network-level policy (separate netns handles routing, BPF-LSM handles edge cases)
-- Audit logging (BPF ring buffer is still the source of truth)
+- Audit logging for operations that reach its hooks, correlated with broker events.
+  Namespace-rejected paths may fail before those hooks, so a BPF ring buffer
+  alone cannot record every invisible-path attempt or guarantee durable logging.
 
 ---
 
@@ -157,7 +159,7 @@ BPF-LSM remains essential for:
 
 ```
 zelx-run <app> [args...]
-    1. Create cgroup v2 slice (Phase 2)
+    1. Authenticate launch and register a protected cgroup instance via the privileged service (Phase 2)
     2. Apply seccomp filter (Phase 4)
     3. Unshare namespaces (Phase 6)
     4. Set up UID mapping (Phase 6)

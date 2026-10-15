@@ -20,7 +20,9 @@ fanotify    +runtime     +cgroup     +Wayland    +network    +BPF-LSM    +namesp
  logging     prompts     identity     overlay    (seccomp)   deep hooks  full isolat.
 ```
 
-Each phase is independently usable and ships real security value.
+Each phase has its own acceptance criteria; Phase 0 proves audit plumbing and
+does not itself enforce security. The runtime guide distinguishes implemented
+behavior, validated tests, prototype limitations, and future design work.
 No phase requires a traditional kernel module (`.ko`).
 
 ## RFC Index

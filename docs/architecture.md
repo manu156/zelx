@@ -32,7 +32,7 @@ Wayland, network/media policy, and isolation remain future work.
 
 | Pillar | Android Equivalent | Zelx Mechanism |
 |---|---|---|
-| **Identity** | UID per app | cgroup v2 slice per app launch |
+| **Identity** | UID per app | Privileged launch registry plus protected cgroup v2 membership |
 | **Default-Deny Policy** | SELinux MAC | BPF-LSM hooks (Phase 5) / fanotify (Phase 0) |
 | **Runtime Permissions** | `PackageManager` + dialog | `zelxd` policy engine + `zelx-overlay` |
 | **Auditability** | `logcat` / Privacy Dashboard | SQLite append-only audit log + `zelxctl` |
@@ -80,7 +80,7 @@ Wayland, network/media policy, and isolation remain future work.
 
 The central authority. Runs as a privileged service (root or `CAP_SYS_ADMIN`).
 
-- **Identity resolution**: Maps `fanotify`/BPF events (PID) → cgroup slice → app identity
+- **Identity resolution**: Maps events to a verified instance in a privileged cgroup registry; names and cgroup paths alone do not authenticate apps (Phase 2)
 - **Policy evaluation**: Checks saved rules; if no rule, initiates a permission request
 - **Prompt dispatch**: Forwards permission requests to `zelx-overlay` (Wayland) or CLI
 - **Audit writing**: Appends every decision (allow/deny/prompt) to SQLite with timestamps
@@ -137,7 +137,7 @@ App: open("/home/user/.ssh/id_rsa")
          ▼
     zelxd receives event
          │
-         ├─ lookup PID → cgroup → "discord-a3f2"
+         ├─ verify process membership → privileged instance registry → app policy
          ├─ lookup policy DB: no rule for (discord, ~/.ssh/**)
          │
          ▼
