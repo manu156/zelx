@@ -1,6 +1,7 @@
 # Phase 1 — Runtime Permissions (CLI Prompt)
 
-**Status:** `[ ] Not started`
+**Status:** Rust implementation — privileged kernel acceptance testing pending.
+See the [runtime guide](../runtime.md) for usage, validation results, and limits.
 **Depends on:** Phase 0
 **Goal:** Block unauthorized access and ask the user before allowing.
 
@@ -10,12 +11,13 @@
 
 Transform `zelxd` from a passive observer into an **active gatekeeper**.
 When an app touches a protected path:
-1. Freeze the calling thread (already works via `FAN_OPEN_PERM`)
+1. Freeze the calling thread using `FAN_OPEN_PERM`
 2. Present a permission prompt to the user (CLI/terminal for now)
-3. Save the decision as a rule
-4. Log the outcome and respond to the kernel
+3. Respond before the original deadline; persist SESSION/ALWAYS only if accepted
+4. Append the actual outcome to the audit log after the kernel response
 
-At the end of this phase, `zelx-run discord` provides **real, meaningful security**.
+Phase 1 gates supported file opens in watched roots. Comm identity is still
+spoofable; this is not yet a hard security boundary. See the runtime guide.
 
 ---
 
@@ -38,27 +40,21 @@ At the end of this phase, `zelx-run discord` provides **real, meaningful securit
 2. Is compositor / overlay PID?          → ALLOW (exemption)  
 3. Does path match system allowlist?     → ALLOW (silent)
 4. Lookup rules table:
-     WHERE app_id = ? AND target GLOB ? AND scope != 'ONCE'
-   → If found: apply decision
+     App-specific exact/glob matches, then global rules; permanent + session
+   → Evaluate patterns in Rust using RFC-002 precedence; apply the best match
 5. No rule found → PROMPT
 6. After prompt: save rule if scope = SESSION or ALWAYS
 ```
 
 ### System allowlist (compiled-in defaults)
 
-```c
-static const char *SYSTEM_ALLOW_PREFIXES[] = {
-    "/usr/",
-    "/lib/",
-    "/lib64/",
-    "/etc/ld.so",
-    "/etc/fonts/",
-    "/etc/locale",
-    "/etc/ssl/certs/",
-    "/proc/self/",
-    "/sys/class/dri/",
-    NULL
-};
+```rust
+const SYSTEM_DIRECTORIES: &[&str] = &[
+    "/usr", "/lib", "/lib64", "/etc/fonts", "/etc/ssl/certs",
+    "/proc/self", "/sys/class/dri",
+];
+// Directory comparisons respect component boundaries. Additional baseline paths:
+// /etc/ld.so.*, /etc/locale*, /etc/timezone.
 ```
 
 ---
@@ -72,7 +68,7 @@ When no rule is found, `zelxd` writes a prompt to a dedicated TTY or stderr:
 │  ZELX PERMISSION REQUEST                                    │
 │                                                             │
 │  App:      discord (PID 4821)                               │
-│  Wants:    read filesystem                                  │
+│  Wants:    open filesystem                                  │
 │  Path:     /home/user/.ssh/id_ed25519                       │
 │                                                             │
 │  [1] Allow once    [2] Allow always                         │
@@ -103,11 +99,11 @@ zelxctl policy import zelx-policy.json     # restore
 
 - [ ] `zelx-run discord` triggers a prompt when Discord first reads `~/.config`
 - [ ] Choosing "Allow always" prevents future prompts for that path glob
-- [ ] Choosing "Deny" causes Discord's `open()` to return `EACCES`
-- [ ] Session rules expire when `zelxd` restarts
-- [ ] `zelxctl policy list discord` shows the saved rules
+- [ ] Choosing "Deny" causes Discord's `open()` to return `EPERM` (fanotify `FAN_DENY`)
+- [x] Session rules expire when `zelxd` restarts (simulated runtime test)
+- [x] `zelxctl policy list discord` shows saved permanent rules (CLI tests)
 - [ ] Auto-deny fires correctly on timeout (no frozen processes)
-- [ ] System paths (`/usr/**`, `/lib/**`) never generate prompts
+- [x] System paths (`/usr/**`, `/lib/**`) bypass prompts (policy tests)
 
 ---
 

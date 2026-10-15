@@ -94,7 +94,9 @@ stays connected to `zelxd` and handles one prompt at a time.
 
 ## `zelx-overlay` Implementation
 
-Language: **C** (wayland-client + cairo or nanosvg for rendering)
+Language: **Rust**, following [RFC-005](../rfc/RFC-005-rust-runtime.md).
+Use Rust Wayland/protocol bindings and rendering libraries; native library
+dependencies do not require writing the overlay itself in C.
 
 Dependencies:
 - `wayland-client`
@@ -103,18 +105,13 @@ Dependencies:
 - `cairo` + `pango` (text rendering)
 - `libxkbcommon` (keyboard handling)
 
-```c
-// Minimal structure
-struct overlay_state {
-    struct wl_display    *display;
-    struct wl_compositor *compositor;
-    struct zwlr_layer_shell_v1 *layer_shell;
-    struct wl_surface    *surface;
-    struct zwlr_layer_surface_v1 *layer_surface;
-    // ... cairo surface for drawing
-    // ... unix socket fd to zelxd
-    PendingRequest        current_request;
-};
+```rust
+// Design sketch; protocol/rendering types will be chosen in Phase 3.
+struct OverlayState {
+    display: DisplayConnection,
+    layer_surface: Option<LayerSurface>,
+    current_request: Option<PermissionRequest>,
+}
 ```
 
 ---
@@ -141,7 +138,8 @@ layerrule = dimaround, zelx-overlay
 3. `zelxd` receives a permission event → sends JSON to overlay socket
 4. `zelx-overlay` renders the surface, grabs input
 5. User responds → overlay sends JSON back → releases input grab → hides surface
-6. `zelxd` receives response → writes rule + audit entry → responds to kernel
+6. `zelxd` receives response → reader responds before deadline → worker persists
+   an accepted grant and appends the actual audit outcome
 
 If `zelx-overlay` crashes or disconnects: `zelxd` falls back to auto-deny with
 a log entry: `"overlay unavailable — denied by default"`.

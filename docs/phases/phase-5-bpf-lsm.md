@@ -38,6 +38,9 @@ adds socket-level and process-level interception.
 
 ## BPF-LSM Architecture
 
+The user-space loader remains Rust (RFC-005); the C below is a kernel BPF
+program sketch, not a return to C for the daemon.
+
 ### eBPF program structure
 
 ```c

@@ -16,6 +16,18 @@ Flatpak, or Snap.
 
 ---
 
+## Current implementation and language
+
+Phases 0–1 use Rust for `zelxd`, `zelxctl`, and `zelx-run`, with a shared library.
+The reader owns kernel descriptors and deadlines; a worker owns SQLite, session
+rules, caching, and prompts. Channels connect them. Linux ABI operations are
+isolated behind documented safe wrappers. See [RFC-005](./rfc/RFC-005-rust-runtime.md)
+and the [runtime guide](./runtime.md).
+
+The rest of this document describes the target architecture across all phases.
+The current launcher sets an informational identity hint; cgroup identity,
+Wayland, network/media policy, and isolation remain future work.
+
 ## The Four Pillars
 
 | Pillar | Android Equivalent | Zelx Mechanism |
@@ -145,7 +157,7 @@ App: open("/home/user/.ssh/id_rsa")
     zelxd → FAN_DENY → kernel
          │
          ▼
-App: open() returns EACCES
+App: open() returns EPERM (fanotify FAN_DENY)
 ```
 
 ---

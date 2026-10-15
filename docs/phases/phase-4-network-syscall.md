@@ -37,6 +37,9 @@ spoof the return value.
 
 ### Setup (in `zelx-run`, Phase 4+)
 
+The C structure below illustrates the Linux ABI; production user-space code
+will use Rust with an audited syscall boundary (RFC-005).
+
 ```c
 // zelx-run installs a seccomp filter before exec()
 // The filter sends notifications to zelxd for sensitive syscalls

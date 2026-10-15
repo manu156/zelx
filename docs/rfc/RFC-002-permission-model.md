@@ -56,7 +56,7 @@ Define how permission rules are expressed, stored, and evaluated. The model must
 2. System allowlist   — /usr/**, /lib/**, /etc/fonts/**, etc.  → ALLOW (silent)
 3. Rule lookup        — query rules table with most-specific match first
    a. Exact match     — app_id + exact target
-   b. Glob match      — app_id + target_pattern GLOB target
+   b. Glob match      — app_id + Rust glob matcher(target_pattern, target)
    c. Wildcard app    — app_id="*" rules (global policy)
 4. No rule found      → PROMPT (send to overlay or CLI)
 5. scope=ONCE         → apply decision, do NOT save rule
@@ -120,18 +120,22 @@ CREATE INDEX idx_events_ts ON events (ts);
 `zelxd` maintains an LRU cache of recent rule lookups to avoid SQLite queries
 on the hot path:
 
-```c
-typedef struct {
-    char    app_id[64];
-    char    resource[32];
-    char    target_hash[32];   // SHA-256 prefix of target string
-    int8_t  decision;          // ALLOW=1, DENY=0
-    time_t  expires;           // for SESSION scope
-} RuleCache;
+```rust
+// Store the complete key so hash collisions cannot change a permission decision.
+#[derive(Hash, PartialEq, Eq)]
+struct PolicyKey {
+    app_id: String,
+    resource: String,
+    target: String,
+}
+// lru::LruCache<PolicyKey, Option<Decision>>; capacity 4096.
+// Session grants are separate in-memory rules, not a TTL on cached evaluations.
 ```
 
 Cache size: 4096 entries. TTL for SESSION rules: zelxd process lifetime.
-Cache is invalidated on `zelxctl policy revoke` via an internal signal.
+Database revision triggers invalidate the cache on rule changes. Revocation
+records also remove matching session grants on the next evaluation; no signal
+or shared mutable SQLite connection is needed.
 
 ---
 

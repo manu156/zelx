@@ -1,0 +1,120 @@
+# Reference for the system allowlist compiled into Phase 1; not loaded at runtime.
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/usr"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/usr/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/lib"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/lib/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/lib64"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/lib64/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/fonts"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/fonts/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/ssl/certs"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/ssl/certs/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/proc/self"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/proc/self/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/sys/class/dri"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/sys/class/dri/**"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/ld.so.*"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/locale*"
+decision = "ALLOW"
+scope = "ALWAYS"
+
+[[rules]]
+app_id = "*"
+resource = "filesystem"
+target_glob = "/etc/timezone"
+decision = "ALLOW"
+scope = "ALWAYS"

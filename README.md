@@ -74,17 +74,22 @@ See [`docs/architecture.md`](./docs/architecture.md) for the full component map 
 
 ---
 
+Implementation: **Rust** user-space runtime, with Linux ABI wrappers and SQLite.
+See [RFC-005](./docs/rfc/RFC-005-rust-runtime.md) for the design.
+
 ## Roadmap
 
 - [x] **Phase 0 — fanotify Audit:** Synchronous filesystem interception and live audit logging.
-- [ ] **Phase 1 — Runtime Permissions:** Policy engine with allow/deny rules and CLI prompts.
+- [x] **Phase 1 — Runtime Permissions:** Policy engine with allow/deny rules and CLI prompts.
 - [ ] **Phase 2 — App Identity:** Track child processes via cgroup v2 app slices.
 - [ ] **Phase 3 — Wayland Overlay:** Native `wlr-layer-shell` Hyprland permission dialog.
 - [ ] **Phase 4 — Network & Syscall:** `seccomp_unotify` for network, clipboard, and screen capture gating.
 - [ ] **Phase 5 — BPF-LSM:** Sleepable `BPF_PROG_TYPE_LSM` for deep hooks + WirePlumber plugin.
 - [ ] **Phase 6 — Full Isolation:** Namespace-based sandboxing (mount, net, pid, ipc) — Android-equivalent isolation.
 
-See [`docs/phases/`](./docs/phases/) for detailed plans and success criteria for each phase.
+Phases 0–1 are implemented; privileged kernel validation is pending. See
+[`docs/runtime.md`](./docs/runtime.md) for build, usage, tests, and current limits,
+and [`docs/phases/`](./docs/phases/) for the plans and acceptance criteria.
 
 ---
 
@@ -105,7 +110,7 @@ Zelx is looking for collaborators who want to fix desktop Linux security at the 
 
 - **Kernel & eBPF Engineers:** BPF-LSM, fanotify, `seccomp_unotify`, and custom LSM development.
 - **Wayland / Hyprland Developers:** `wlr-layer-shell`, input locking, and C++ Hyprland plugin integration.
-- **Systems Programmers (C / Rust):** High-performance daemon (`zelxd`) and SQLite/eBPF audit pipeline.
+- **Systems Programmers (Rust):** High-performance daemon (`zelxd`) and SQLite/eBPF audit pipeline.
 
 Open an issue or join the discussion to claim a module.
 

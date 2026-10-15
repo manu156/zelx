@@ -48,13 +48,11 @@ All children of this process (and their children) automatically live in
 
 ### Identity lookup in `zelxd`
 
-```c
-// identity.c
-char *zelx_get_app_id(pid_t pid) {
-    // Read /proc/<pid>/cgroup
-    // Find the line: 0::/zelx.slice/zelx-<app>-<uuid>.scope
-    // Return "zelx-discord-a3f2b1c8" (stable for all children)
-}
+```rust
+// identity.rs: derive app and instance labels from a verified Zelx cgroup path.
+let identity = AppIdentity::resolve(pid);
+// Find /zelx.slice/zelx-<app>-<uuid>.scope, then derive the policy/audit keys.
+// Validate ownership/delegation before treating the cgroup as trusted identity.
 ```
 
 ### Policy stored by app base name

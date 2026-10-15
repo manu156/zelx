@@ -38,7 +38,7 @@ Three mechanisms can do this without a traditional `.ko` kernel module.
 ### Phase 0–3: fanotify FAN_OPEN_PERM
 
 Use `fanotify` for the MVP because:
-- Works on every kernel ≥ 3.8 (all modern distros)
+- This implementation requires Linux ≥ 4.20 for filesystem marks
 - Filesystem is the highest-priority permission to protect (`~/.ssh`, credentials)
 - Minimal implementation complexity
 - Proven in production (Dropbox, antivirus tools, etc.)
@@ -58,6 +58,11 @@ if (metadata->pid == getpid()) {
 }
 // Also exempt the overlay and compositor PIDs (stored at startup)
 ```
+
+The actual implementation uses a dedicated reader plus a policy/database worker
+(see RFC-005). A PID check alone cannot prevent a reader thread from blocking
+on its own open before it can read that event. Kernel ABI snippets below are
+illustrative C; the user-space implementation is Rust.
 
 Use `O_PATH` for the zelxd's internal file operations where possible (doesn't
 trigger `FAN_OPEN_PERM`).
@@ -127,7 +132,7 @@ is marginally faster task metadata access, which is not worth:
 
 | Phase | Minimum Kernel | Config Flags Required |
 |---|---|---|
-| Phase 0–3 | 3.8 | None (fanotify is always available) |
+| Phase 0–3 | 4.20 (filesystem marks) | `CONFIG_FANOTIFY=y`, `CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y` |
 | Phase 4 | 5.0 | None (seccomp_unotify is mainline) |
 | Phase 5 | 5.7 (BPF-LSM) | `CONFIG_BPF_LSM=y`, `CONFIG_DEBUG_INFO_BTF=y` |
 | Phase 5 (sync) | 5.11 (sleepable BPF) | Same as above + `CONFIG_BPF_EVENTS=y` |

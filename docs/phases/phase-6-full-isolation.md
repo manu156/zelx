@@ -56,6 +56,9 @@ Host filesystem                   App's filesystem view (Discord)
     └── pipewire-0 ──────────►        └── pipewire-0 (PipeWire — gated in phase 5)
 ```
 
+The launcher and namespace manager remain Rust (RFC-005). C examples here
+illustrate kernel ABI calls; they are not implementation language requirements.
+
 ### Building the mount namespace
 
 ```c
@@ -168,7 +171,7 @@ zelx-run <app> [args...]
 
 ## Success Criteria
 
-- [ ] Discord cannot see `/home/user/.ssh/` at all (ENOENT, not EACCES)
+- [ ] Discord cannot see `/home/user/.ssh/` at all (ENOENT; Phase 1 fanotify denial returns EPERM)
 - [ ] Discord cannot see other user processes in `/proc/`
 - [ ] Discord cannot reach the network without a grant
 - [ ] A granted path (`~/.config/discord`) is readable/writable inside the app

@@ -1,13 +1,14 @@
 # Phase 0 — fanotify Intercept & Audit Logging
 
-**Status:** `[ ] Not started`
+**Status:** Rust implementation — privileged kernel acceptance testing pending.
+See the [runtime guide](../runtime.md) for usage, validation results, and limits.
 **Goal:** Prove the kernel interception chain is real and shippable.
 
 ---
 
 ## Objective
 
-A working daemon (`zelxd`) that:
+In passive mode (`zelxd --audit-only`), the daemon:
 1. Intercepts every `open()` call touching `$HOME` using `fanotify FAN_OPEN_PERM`
 2. Auto-allows everything (no prompting yet)
 3. Logs every event to SQLite with app identity and timestamp
@@ -20,16 +21,15 @@ It is the foundation every subsequent phase builds on.
 
 ## Components
 
-| Component | Language | Lines (est.) |
-|---|---|---|
-| `zelxd/main.c` | C | ~300 |
-| `zelxd/audit.c` | C | ~100 |
-| `zelxd/identity.c` | C | ~80 |
-| `zelxctl/main.c` | C | ~150 |
-| `zelx-run` | Shell | ~30 |
-| `Makefile` | Make | ~40 |
+| Component | Implementation |
+|---|---|
+| `src/bin/zelxd.rs`, `src/daemon.rs`, `src/linux.rs` | Rust daemon and Linux ABI boundary |
+| `src/db.rs`, `src/policy.rs`, `src/identity.rs` | Shared Rust runtime library |
+| `src/bin/zelxctl.rs` | Rust audit and policy CLI |
+| `src/bin/zelx-run.rs` | Rust `exec` launcher |
+| `Cargo.toml`, `Cargo.lock`, `Makefile` | Cargo build and test wrappers |
 
-Total: ~700 lines. **Shippable in a weekend.**
+See [RFC-005](../rfc/RFC-005-rust-runtime.md) for ownership and migration decisions.
 
 ---
 
@@ -37,15 +37,11 @@ Total: ~700 lines. **Shippable in a weekend.**
 
 ### 1. `zelxd` — fanotify event loop
 
-```c
-// Setup
-int fan_fd = fanotify_init(FAN_CLASS_CONTENT | FAN_CLOEXEC | FAN_NONBLOCK,
-                           O_RDONLY | O_LARGEFILE | O_CLOEXEC);
-
-fanotify_mark(fan_fd, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-              FAN_OPEN_PERM, AT_FDCWD, "/home");
-
-// Event loop: read events, resolve identity, log, respond FAN_ALLOW
+```rust
+// linux.rs owns the small unsafe syscall boundary.
+let group = Fanotify::new()?;
+group.mark_filesystem(std::path::Path::new("/home"))?;
+// Reader owns permission descriptors; worker owns policy, prompts, and SQLite.
 ```
 
 Key details:
@@ -59,14 +55,13 @@ Key details:
 Read `/proc/<pid>/comm` for the process name.
 Read `/proc/<pid>/cgroup` for future cgroup identity (Phase 2 will use this fully).
 
-```c
-// identity.c
-typedef struct {
-    pid_t   pid;
-    char    comm[64];       // /proc/<pid>/comm
-    char    cgroup[256];    // /proc/<pid>/cgroup
-    char    exe[PATH_MAX];  // /proc/<pid>/exe (symlink)
-} AppIdentity;
+```rust
+pub struct AppIdentity {
+    pub pid: i32,
+    pub comm: String,
+    pub cgroup: String,
+    pub exe: std::path::PathBuf,
+}
 ```
 
 ### 3. SQLite audit schema
@@ -113,14 +108,14 @@ TIMESTAMP            APP       DECISION  RESOURCE    TARGET
 
 `zelxd` must never intercept its own file opens. Hard-code an exemption for:
 - `zelxd`'s own PID (set at startup)
-- Any PID in the `zelxd` cgroup
+- Any PID in a dedicated, root-controlled `zelxd` service cgroup
+  (never a shared user-session cgroup)
 - System paths: `/proc`, `/sys`, `/dev`
 
-```c
-// Before writing FAN_DENY, always check:
-if (event->pid == getpid()) {
-    write_allow(fan_fd, event->fd);
-    return;
+```rust
+if event.pid == std::process::id() as i32 {
+    group.respond(&event.fd, true)?;
+    continue; // OwnedFd closes on scope exit; no self-audit entry.
 }
 ```
 
@@ -128,26 +123,21 @@ if (event->pid == getpid()) {
 
 ## `zelx-run` (Phase 0 — minimal)
 
-A shell script that just sets an env var for now (cgroup creation is Phase 2):
-
-```bash
-#!/bin/bash
-# zelx-run: launch an app under zelx supervision
-# Phase 0: env var identity only. Phase 2: cgroup slice.
-export ZELX_APP_ID="${1##*/}"
-exec "$@"
-```
+A Rust launcher sets `ZELX_APP_ID` to the command basename and uses
+`std::os::unix::process::CommandExt::exec`. It preserves argument bytes, PID,
+signals, and command exit status. This is an informational hint, not trusted
+identity. Cgroup creation remains Phase 2.
 
 ---
 
 ## Success Criteria
 
-- [ ] `sudo zelxd &` starts without crashing
+- [ ] `sudo zelxd --audit-only &` starts without crashing
 - [ ] `zelx-run discord` + `zelxctl trace discord` shows all files discord opened
 - [ ] `zelxd` does NOT appear in its own audit log
 - [ ] Killing `zelxd` mid-run does not leave any process frozen indefinitely
   (fanotify auto-allows pending events when the fd is closed)
-- [ ] `zelxctl trace --last 1h` is readable and sorted correctly
+- [x] `zelxctl trace --last 1h` is readable and sorted correctly (CLI tests)
 
 ---
 

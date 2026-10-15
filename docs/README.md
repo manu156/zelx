@@ -6,6 +6,7 @@
 
 | Document | Purpose |
 |---|---|
+| [Runtime guide](./runtime.md) | Build, run, configure, and test Phases 0–1 |
 | [Architecture](./architecture.md) | Full system design — components, layers, data flows |
 | [Threat Model](./threat-model.md) | What we protect against, attacker model, explicit non-goals |
 | [Phases](./phases/) | Progressive implementation roadmap (Phase 0 → 6) |
@@ -30,3 +31,4 @@ No phase requires a traditional kernel module (`.ko`).
 | [RFC-002](./rfc/RFC-002-permission-model.md) | Permission Model — rule grammar, storage, evaluation |
 | [RFC-003](./rfc/RFC-003-terminal-heuristic.md) | The Terminal Problem — CLI apps, shells, and session labels |
 | [RFC-004](./rfc/RFC-004-kernel-interception-stack.md) | Kernel Interception Stack — fanotify vs seccomp_unotify vs BPF-LSM |
+| [RFC-005](./rfc/RFC-005-rust-runtime.md) | Rust runtime, descriptor ownership, and migration boundaries |
