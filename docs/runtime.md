@@ -69,6 +69,21 @@ The test opener exits with that errno; both simulated and real tests require it.
 request's deadline starts at receipt, including time spent queued behind another
 prompt. No input from a previous prompt is accepted for the next prompt.
 
+`--max-pending 64` bounds the worker queue and retained permission requests;
+values 1–1024 are accepted. The effective limit is reduced to fit the process's
+open-file limit, reserving 64 descriptors for runtime operations and event reads.
+Startup fails if that reserve leaves no request capacity. Event reads adopt at
+most 32 descriptors per batch. The ready message reports the effective limit.
+
+When capacity is exhausted, enforcement denies excess opens immediately while
+the reader continues handling events and exemptions. Audit-only mode continues
+allowing opens. Excess requests are counted in bounded `OVERLOAD` audit summaries
+with app `__zelx__`; the JSON target records `denied`, `allowed`, `first_ts`, and
+`last_ts`. These summaries explicitly replace per-path detail during overload.
+They are queued when capacity returns and drained during graceful shutdown.
+Crash/audit failure can still lose an unwritten summary. Increasing queue limits
+does not eliminate the kernel's own queue limits or the documented crash behavior.
+
 `--watch DIR` may be repeated (64 roots maximum); the default is `/home`.
 Interception applies to **all processes** accessing those roots, including apps
 launched outside `zelx-run`. The launcher currently preserves arguments and exit
@@ -102,6 +117,9 @@ validates the whole file, then appends rules in one transaction. It assigns new
 IDs and records the import time and creator. It does not erase existing rules.
 Imports are limited to 8 MiB. Revoke removes matching permanent **and session**
 rules; rule changes are visible on the next evaluation without restarting.
+Session grants record the latest committed revocation ID at creation: a revoke
+that preceded the grant cannot erase it, including a revoke issued while its
+prompt was displayed. A later matching revoke invalidates the grant.
 Other resource categories can be stored/imported for future phases but are not
 intercepted yet.
 
@@ -111,8 +129,10 @@ equal-specificity ties prefer deny. `*` matches within one path component, `**`
 crosses slashes, and `?`, bracket expressions, and backslash quoting are supported.
 POSIX named classes use ASCII semantics; unknown classes and reversed ranges
 match nothing, including when negated.
-The pattern `/dir/` matches that directory exactly. Use `/dir/**` for descendants;
-add `/dir` separately if opening the directory itself should also be allowed.
+The pattern `/dir/` is equivalent to `/dir`; trailing separators on absolute
+patterns are normalized before matching and specificity comparison. Use `/dir/**`
+for descendants and `/dir` separately for the directory itself. These text
+policies do not encode a separate file-type constraint.
 
 The default database is `/var/lib/zelx/zelx.db`, created with private permissions.
 Use `--db FILE` on both programs for another location; `ZELX_DB` is also accepted
@@ -124,12 +144,15 @@ tamper resistance.
 
 Audit records include Unix millisecond timestamps, comm name, PID, an
 `app_instance` label (`comm:pid`), resource,
-target, decision (`ALLOW`, `DENY`, `PROMPT_ALLOW`, `PROMPT_DENY`), optional rule ID,
+target, decision (`ALLOW`, `DENY`, `PROMPT_ALLOW`, `PROMPT_DENY`, or an `OVERLOAD`
+summary), optional rule ID,
 and monotonic decision latency in microseconds. Executable and cgroup details
 are collected with the request for future identity work; Phase 1 stores comm and
 PID in the schema from RFC-002. Trace is ordered by timestamp then event ID and
 escapes terminal control bytes in app names and paths. Rule IDs in old events
 remain historical identifiers after revocation.
+Literal backslashes display as `\\` and nonprinting/non-ASCII bytes as `\xNN`,
+so a filename containing a control byte cannot resemble a literal escape string.
 
 ## Implementation and limits
 
@@ -143,6 +166,10 @@ watchdog independently denies expired active and queued requests. A 4096-entry
 LRU caches evaluations; database revision triggers invalidate cached decisions
 on policy changes, and revocation records invalidate session grants. Audit writes
 do not invalidate the policy cache.
+Work is sent with nonblocking bounded channel operations; the reader never waits
+for queue space. The pending and expired-request maps share the same request
+budget, so expiration cannot move requests into an unbounded secondary queue.
+The worker has at most one active item in addition to its bounded queue.
 
 Before enabling filesystem marks, the daemon installs persistent inode ignore
 marks for its database, WAL, and shared-memory files. These three storage files
@@ -243,3 +270,10 @@ into a different policy target; the current text schema cannot grant them.
 
 Trace also escapes raw filename bytes already present in old C audit records.
 Existing non-UTF-8 policy patterns are rejected rather than decoded lossily.
+
+Post-review validation (2026-10-15): 14 Rust unit tests, 10 CLI tests, and 15
+simulated daemon tests pass; formatting and strict Clippy checks pass. New
+regressions cover queue saturation and graceful shutdown, audit-mode overload
+accounting, grants after revoke during a prompt, directory rules, and ambiguous
+filename display. The expanded real-kernel suite has 16 tests and requires a
+new privileged run; the earlier 12-test result describes the baseline commit.

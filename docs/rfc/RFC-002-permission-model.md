@@ -38,6 +38,11 @@ Define how permission rules are expressed, stored, and evaluated. The model must
 | `/home/user/**` | Everything under home (grant-all) |
 | `/home/user/.ssh/**` | All SSH files |
 
+Trailing separators on absolute patterns are normalized: `/dir/` and `/dir`
+are equivalent and have equal specificity. They do not match descendants;
+`/dir/**` grants descendants separately. These text patterns do not encode file
+type. Equivalent normalized rules still prefer deny at equal specificity.
+
 ### Glob semantics for network
 
 | Pattern | Matches |
@@ -136,6 +141,9 @@ Cache size: 4096 entries. TTL for SESSION rules: zelxd process lifetime.
 Database revision triggers invalidate the cache on rule changes. Revocation
 records also remove matching session grants on the next evaluation; no signal
 or shared mutable SQLite connection is needed.
+Each session grant records the latest committed revocation ID when created.
+Only newer matching revocations invalidate it, so a revoke during a prompt does
+not erase a grant accepted afterward.
 
 ---
 

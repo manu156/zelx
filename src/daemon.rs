@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender, SyncSender},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
         Arc,
     },
     thread,
@@ -43,6 +43,9 @@ pub struct Options {
     pub tty: Option<PathBuf>,
     #[arg(long,default_value="30",value_parser=clap::value_parser!(u64).range(1..=300))]
     pub timeout: u64,
+    /// Maximum queued work items and retained permission requests.
+    #[arg(long, default_value = "64", value_parser = clap::value_parser!(u16).range(1..=1024))]
+    pub max_pending: u16,
     #[arg(long,value_parser=clap::value_parser!(i32).range(2..))]
     pub exempt_pid: Vec<i32>,
 }
@@ -70,6 +73,66 @@ struct RequestedDecision {
     decision: Decision,
     reply: SyncSender<Outcome>,
 }
+
+enum Work {
+    Access(Job),
+    Overload(Overload),
+}
+
+#[derive(Default, serde::Serialize)]
+struct Overload {
+    denied: u64,
+    allowed: u64,
+    first_ts: i64,
+    last_ts: i64,
+}
+impl Overload {
+    fn record(&mut self, decision: Decision, ts: i64) {
+        if self.denied == 0 && self.allowed == 0 {
+            self.first_ts = ts;
+        }
+        self.last_ts = ts;
+        let count = if decision.allowed() {
+            &mut self.allowed
+        } else {
+            &mut self.denied
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn audit(&self, database: &Database) -> Result<()> {
+        let target = serde_json::to_string(self)?;
+        database
+            .audit(AuditEvent {
+                ts: self.first_ts,
+                app: "__zelx__",
+                pid: std::process::id() as i32,
+                target: &target,
+                decision: "OVERLOAD",
+                rule_id: None,
+                latency_us: 0,
+            })
+            .context("AUDIT WRITE FAILED; stopping")
+    }
+}
+
+fn flush_overload(jobs: &SyncSender<Work>, overload: &mut Option<Overload>) -> Result<()> {
+    if let Some(summary) = overload.take() {
+        match jobs.try_send(Work::Overload(summary)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(Work::Overload(summary))) => *overload = Some(summary),
+            Err(TrySendError::Disconnected(Work::Overload(summary))) => {
+                *overload = Some(summary);
+                bail!("policy worker unavailable");
+            }
+            Err(TrySendError::Disconnected(Work::Access(_))) => {
+                unreachable!("sent an overload summary")
+            }
+            Err(TrySendError::Full(Work::Access(_))) => unreachable!("sent an overload summary"),
+        }
+    }
+    Ok(())
+}
 fn latency(start: Instant) -> i64 {
     start.elapsed().as_micros().min(i64::MAX as u128) as i64
 }
@@ -77,12 +140,19 @@ fn latency(start: Instant) -> i64 {
 fn worker(
     mut policy: Policy,
     prompt: Option<Prompt>,
-    jobs: Receiver<Job>,
-    decisions: Sender<RequestedDecision>,
+    jobs: Receiver<Work>,
+    decisions: SyncSender<RequestedDecision>,
     wake: OwnedFd,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
-    for job in jobs {
+    for work in jobs {
+        let job = match work {
+            Work::Access(job) => job,
+            Work::Overload(summary) => {
+                summary.audit(&policy.database)?;
+                continue;
+            }
+        };
         let mut prompted = false;
         let mut answer = None;
         let mut rule_id = None;
@@ -287,6 +357,7 @@ pub fn run(mut options: Options) -> Result<()> {
         })
         .collect::<Result<_>>()?;
     linux::private_umask();
+    let capacity = linux::request_capacity(usize::from(options.max_pending))?;
     let _lock = prepare_storage(&options.db)?;
     let database = Database::open(&options.db, false)?;
     let prompt = Prompt::open(options.tty.as_deref())?;
@@ -322,8 +393,8 @@ pub fn run(mut options: Options) -> Result<()> {
         .into_iter()
         .map(|signal| signal_hook::flag::register(signal, stop.clone()))
         .collect::<io::Result<_>>()?;
-    let (jobs_tx, jobs_rx) = mpsc::channel();
-    let (decisions_tx, decisions_rx) = mpsc::channel();
+    let (jobs_tx, jobs_rx) = mpsc::sync_channel(capacity);
+    let (decisions_tx, decisions_rx) = mpsc::sync_channel(1);
     let (wake_rx, wake_tx) = linux::pipe()?;
     let cancel = stop.clone();
     let worker = thread::Builder::new()
@@ -340,16 +411,18 @@ pub fn run(mut options: Options) -> Result<()> {
         })?;
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut completed = HashMap::new();
+    let mut overload = None;
     let mut next_id = 0u64;
     eprintln!(
-        "zelxd ready: mode={} roots={} timeout={}s",
+        "zelxd ready: mode={} roots={} timeout={}s max_pending={}",
         if options.audit_only {
             "audit"
         } else {
             "enforce"
         },
         roots.len(),
-        options.timeout
+        options.timeout,
+        capacity
     );
     let mut result = (|| -> Result<()> {
         while !stop.load(Ordering::Relaxed) {
@@ -363,6 +436,7 @@ pub fn run(mut options: Options) -> Result<()> {
                 &mut completed,
                 &stop,
             )?;
+            flush_overload(&jobs_tx, &mut overload)?;
             let expired: Vec<_> = pending
                 .iter()
                 .filter(|(_, e)| Instant::now() >= e.deadline)
@@ -456,26 +530,46 @@ pub fn run(mut options: Options) -> Result<()> {
                     None
                 };
                 next_id = next_id.checked_add(1).context("request ID exhausted")?;
-                if immediate.is_none() {
-                    pending.insert(
-                        next_id,
-                        Pending {
-                            fd,
-                            started,
-                            deadline,
-                        },
-                    );
+                let job = Work::Access(Job {
+                    id: next_id,
+                    identity,
+                    path: target,
+                    ts,
+                    deadline,
+                    immediate,
+                });
+                let admitted = if immediate.is_none() && pending.len() + completed.len() >= capacity
+                {
+                    false
+                } else {
+                    match jobs_tx.try_send(job) {
+                        Ok(()) => true,
+                        Err(TrySendError::Full(_)) => false,
+                        Err(TrySendError::Disconnected(_)) => bail!("policy worker unavailable"),
+                    }
+                };
+                if admitted {
+                    if immediate.is_none() {
+                        pending.insert(
+                            next_id,
+                            Pending {
+                                fd,
+                                started,
+                                deadline,
+                            },
+                        );
+                    }
+                } else {
+                    let decision = if let Some(outcome) = immediate {
+                        outcome.decision
+                    } else {
+                        group.respond(&fd, false)?;
+                        Decision::Deny
+                    };
+                    overload
+                        .get_or_insert_with(Overload::default)
+                        .record(decision, ts);
                 }
-                jobs_tx
-                    .send(Job {
-                        id: next_id,
-                        identity,
-                        path: target,
-                        ts,
-                        deadline,
-                        immediate,
-                    })
-                    .context("policy worker unavailable")?;
             }
         }
         Ok(())
@@ -501,7 +595,7 @@ pub fn run(mut options: Options) -> Result<()> {
         );
     }
     drop(group);
-    drop(jobs_tx);
+    let mut jobs_tx = Some(jobs_tx);
     // A prompt/DB operation may finish during shutdown. Keep acknowledging its
     // messages while it drains the queue, without leaving a kernel group open.
     while !worker.is_finished() {
@@ -510,7 +604,23 @@ pub fn run(mut options: Options) -> Result<()> {
         {
             result = Err(error);
         }
+        if let Some(sender) = &jobs_tx {
+            if let Err(error) = flush_overload(sender, &mut overload) {
+                result = Err(error);
+                jobs_tx.take();
+            } else if overload.is_none() {
+                // Close only after the summary is queued. Blocking send here
+                // could deadlock a worker waiting for an acknowledgement.
+                jobs_tx.take();
+            }
+        }
         thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(summary) = overload {
+        eprintln!(
+            "Overload summary could not be audited: {}",
+            serde_json::to_string(&summary)?
+        );
     }
     for signal in signals {
         signal_hook::low_level::unregister(signal);

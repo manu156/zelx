@@ -142,10 +142,31 @@ fn tokens(pattern: &[u8]) -> Vec<Token> {
     }
     tokens
 }
+fn normalized_pattern(mut pattern: &str) -> &str {
+    if !pattern.starts_with('/') {
+        return pattern;
+    }
+    while let Some(prefix) = pattern.strip_suffix('/') {
+        if prefix.is_empty() {
+            return "/";
+        }
+        let escapes = prefix.bytes().rev().take_while(|&b| b == b'\\').count();
+        // A quoted separator is still a separator. Preserve pairs of quoted
+        // backslashes that belong to the directory's actual filename.
+        pattern = if escapes % 2 == 1 {
+            &prefix[..prefix.len() - 1]
+        } else {
+            prefix
+        };
+    }
+    pattern
+}
+
 pub fn glob_match(pattern: &str, target: &str) -> bool {
     if pattern.len() > 8192 || target.len() >= 4096 {
         return false;
     }
+    let pattern = normalized_pattern(pattern);
     let target = target.as_bytes();
     let mut current = vec![false; target.len() + 1];
     let mut next = current.clone();
@@ -199,10 +220,16 @@ struct Key {
 
 pub struct Policy {
     pub database: Database,
-    sessions: Vec<Rule>,
+    sessions: Vec<SessionRule>,
     cache: LruCache<Key, Option<Evaluation>>,
     revision: i64,
     revocation: i64,
+}
+
+struct SessionRule {
+    rule: Rule,
+    // Revocations at or below this ID preceded the grant and cannot erase it.
+    granted_after: i64,
 }
 impl Policy {
     pub fn new(database: Database) -> Self {
@@ -228,8 +255,11 @@ impl Policy {
         })?;
         for change in changes {
             let (id, app, resource) = change?;
-            self.sessions
-                .retain(|r| r.app_id != app || r.resource.as_str() != resource);
+            self.sessions.retain(|s| {
+                s.granted_after >= id
+                    || s.rule.app_id != app
+                    || s.rule.resource.as_str() != resource
+            });
             self.revocation = id;
             self.cache.clear();
         }
@@ -268,19 +298,20 @@ impl Policy {
         let permanent = self.database.rules(Some(app), Some(resource))?;
         let best = permanent
             .iter()
-            .chain(&self.sessions)
+            .chain(self.sessions.iter().map(|session| &session.rule))
             .filter(|r| {
                 (r.app_id == app || r.app_id == "*")
                     && r.resource == resource
                     && glob_match(&r.target_glob, target)
             })
             .max_by_key(|r| {
+                let pattern = normalized_pattern(&r.target_glob);
                 (
                     r.app_id == app,
-                    tokens(r.target_glob.as_bytes())
+                    tokens(pattern.as_bytes())
                         .iter()
                         .all(|t| matches!(t, Token::Literal(_))),
-                    r.target_glob.len(),
+                    pattern.len(),
                     r.decision == Decision::Deny,
                 )
             })
@@ -316,7 +347,17 @@ impl Policy {
         match scope {
             Scope::Always => Ok(Some(self.database.add_rule(&rule, "user")?)),
             Scope::Session => {
-                self.sessions.push(rule);
+                // This read defines the grant's ordering against concurrent
+                // revoke transactions. A later revoke has a greater ID.
+                let granted_after = self.database.connection.query_row(
+                    "SELECT COALESCE(MAX(id),0) FROM revocations",
+                    [],
+                    |row| row.get(0),
+                )?;
+                self.sessions.push(SessionRule {
+                    rule,
+                    granted_after,
+                });
                 Ok(None)
             }
             Scope::Once => unreachable!(),
@@ -356,6 +397,11 @@ mod tests {
             ("/h/\\*\\?\\[x\\]", "/h/*?[x]", true),
             ("/h/[", "/h/[", true),
             ("/h/path/", "/h/path/file", false),
+            ("/h/path/", "/h/path", true),
+            ("/h/path///", "/h/path", true),
+            ("/h/path\\/", "/h/path", true),
+            ("/h/dir\\\\/", "/h/dir\\", true),
+            ("/", "/", true),
             ("*a*a*a*a*a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaac", false),
         ] {
             assert_eq!(
@@ -477,5 +523,55 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn session_grants_survive_older_revocations_but_not_newer_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.db");
+        let mut policy = Policy::new(Database::open(&path, false).unwrap());
+        let mut writer = Database::open(&path, false).unwrap();
+        assert!(policy
+            .lookup("app", Resource::Filesystem, "/secret")
+            .unwrap()
+            .is_none());
+        writer.revoke("app", Resource::Filesystem).unwrap();
+        policy
+            .save("app", "/secret", Decision::Allow, Scope::Session)
+            .unwrap();
+        assert_eq!(
+            policy
+                .lookup("app", Resource::Filesystem, "/secret")
+                .unwrap()
+                .unwrap()
+                .decision,
+            Decision::Allow
+        );
+        writer.revoke("app", Resource::Filesystem).unwrap();
+        assert!(policy
+            .lookup("app", Resource::Filesystem, "/secret")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn equivalent_directory_rules_keep_deny_precedence() {
+        let mut policy = Policy::new(Database::memory());
+        policy
+            .database
+            .add_rule(&rule("app", "/protected/", Decision::Allow), "test")
+            .unwrap();
+        policy
+            .database
+            .add_rule(&rule("app", "/protected", Decision::Deny), "test")
+            .unwrap();
+        assert_eq!(
+            policy
+                .lookup("app", Resource::Filesystem, "/protected")
+                .unwrap()
+                .unwrap()
+                .decision,
+            Decision::Deny
+        );
     }
 }

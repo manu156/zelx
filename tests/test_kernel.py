@@ -5,6 +5,7 @@ FAN_CLASS_CONTENT + FAN_DENY returns EPERM; both transports must agree exactly.
 """
 import ctypes
 import errno
+import json
 import os
 from pathlib import Path
 import select
@@ -68,11 +69,11 @@ class KernelTests(unittest.TestCase):
                 child.kill()
             child.wait(timeout=3)
 
-    def start(self, audit=False, extra=()):
+    def start(self, audit=False, extra=(), timeout=1):
         if SIMULATED:
             (self.root / "fan.sock").unlink(missing_ok=True)
         args = [str(BIN / 'zelxd'), '--db', str(self.db), '--watch', str(self.watch),
-                '--tty', os.ttyname(self.slave), '--timeout', '1']
+                '--tty', os.ttyname(self.slave), '--timeout', str(timeout)]
         if audit:
             args += ['--audit-only']
         args += list(extra)
@@ -217,6 +218,72 @@ class KernelTests(unittest.TestCase):
         self.assert_open_result(child, errno.EPERM)
         self.assert_open_result(self.opening(), errno.EPERM)
         self.stop()
+
+    def test_session_grant_after_revoke_during_prompt(self):
+        self.start()
+        child = self.opening()
+        self.prompt()
+        subprocess.run([str(BIN / 'zelxctl'), '--db', str(self.db), 'policy', 'revoke',
+                        'zelx-open', 'filesystem'], check=True, timeout=3)
+        os.write(self.master, b'5\n')
+        self.assert_open_result(child, 0)
+        self.assert_open_result(self.opening(), 0)
+        self.stop()
+        self.assertEqual([row[2] for row in self.events()], ['PROMPT_ALLOW', 'ALLOW'])
+
+    def test_directory_rule_with_trailing_slash(self):
+        subprocess.run([str(BIN / 'zelxctl'), '--db', str(self.db), 'policy', 'add',
+                        'zelx-open', 'allow', str(self.watch) + '/', 'always'], check=True, timeout=3)
+        self.start()
+        self.assert_open_result(self.opening(self.watch), 0)
+        child = self.opening()
+        self.choose(3)
+        self.assert_open_result(child, errno.EPERM)
+        self.stop()
+        self.assertEqual([row[2] for row in self.events()], ['ALLOW', 'PROMPT_DENY'])
+
+    def test_overload_denies_without_blocking_reader_or_shutdown(self):
+        self.start(extra=['--max-pending', '2'], timeout=5)
+        first = self.opening()
+        self.prompt()  # hold the policy worker while the bounded queue fills
+        children = [self.opening() for _ in range(5)]
+        end = time.monotonic() + 2
+        while sum(child.poll() is not None for child in children) < 4 and time.monotonic() < end:
+            time.sleep(0.01)
+        finished = [child for child in children if child.poll() is not None]
+        self.assertEqual(len(finished), 4)
+        self.assertIsNone(first.poll())
+        for child in finished:
+            self.assert_open_result(child, errno.EPERM)
+        outside = self.root / 'outside'
+        outside.write_text('outside')
+        self.assert_open_result(self.opening(outside), 0)
+        self.stop()  # a full worker queue must not deadlock graceful shutdown
+        for child in [first, *children]:
+            self.assert_open_result(child, errno.EPERM)
+        rows = self.events()
+        summaries = [json.loads(row[1]) for row in rows if row[2] == 'OVERLOAD']
+        self.assertEqual(sum(row['denied'] for row in summaries), 4)
+        self.assertEqual(sum(row['allowed'] for row in summaries), 0)
+        self.assertEqual(len([row for row in rows if row[2] != 'OVERLOAD']), 2)
+
+    def test_audit_overload_preserves_allows_and_reports_missing_detail(self):
+        self.start(audit=True, extra=['--max-pending', '2'])
+        with sqlite3.connect(self.db) as db:
+            db.execute('BEGIN IMMEDIATE')  # briefly hold audit writes, not the reader
+            try:
+                children = [self.opening() for _ in range(8)]
+                for child in children:
+                    self.assert_open_result(child, 0)
+            finally:
+                db.rollback()
+        self.stop()
+        rows = self.events()
+        summaries = [json.loads(row[1]) for row in rows if row[2] == 'OVERLOAD']
+        self.assertGreater(sum(row['allowed'] for row in summaries), 0)
+        self.assertEqual(sum(row['denied'] for row in summaries), 0)
+        self.assertEqual(len([row for row in rows if row[2] == 'ALLOW']) +
+                         sum(row['allowed'] for row in summaries), 8)
 
     @unittest.skipIf(SIMULATED, 'mount coverage requires real kernel privileges')
     def test_nested_filesystem(self):

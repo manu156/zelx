@@ -22,6 +22,23 @@ pub fn private_umask() {
         libc::umask(0o077);
     }
 }
+pub fn request_capacity(requested: usize) -> Result<usize> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: limit is writable for one rlimit; getrlimit retains no pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } < 0 {
+        return Err(io::Error::last_os_error()).context("read descriptor limit");
+    }
+    // Reserve descriptors for SQLite, terminals, procfs, and a 32-event read.
+    let available = limit.rlim_cur.saturating_sub(64);
+    let capacity = requested.min(usize::try_from(available).unwrap_or(usize::MAX));
+    if capacity == 0 {
+        bail!("descriptor limit is too low; raise the open-file limit above 64");
+    }
+    Ok(capacity)
+}
 pub fn wait(fd: BorrowedFd<'_>, events: i16, timeout: Duration) -> io::Result<i16> {
     let mut descriptor = libc::pollfd {
         fd: fd.as_raw_fd(),
@@ -181,7 +198,8 @@ impl Fanotify {
         Ok(())
     }
     pub fn events(&self) -> Result<Vec<Event>> {
-        let mut buffer = [0u8; 65536];
+        // Keep the transient event descriptors inside the reserved FD budget.
+        let mut buffer = [0u8; 24 * 32];
         match read(self.fd.as_fd(), &mut buffer) {
             Ok(0) => bail!("fanotify group closed unexpectedly"),
             Ok(n) => parse_events(&buffer[..n]),

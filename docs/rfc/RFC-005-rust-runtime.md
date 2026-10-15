@@ -33,6 +33,14 @@ The shell launcher becomes a Rust `exec` wrapper, retaining the informational
 - A nonblocking wakeup pipe makes completed decisions immediately pollable.
   The reader acknowledges the actual kernel response before the worker persists
   a grant or appends its audit record. Expired requests cannot save late grants.
+- Work and decision channels are bounded. The reader uses `try_send` and never
+  blocks on queue capacity. Pending and expired permission requests share a
+  budget, capped by `--max-pending` and descriptor headroom. Enforcement denies
+  excess requests immediately; audit-only mode preserves allows. One bounded
+  counter accumulator emits `OVERLOAD` audit summaries in place of per-path
+  detail until capacity returns, including during graceful shutdown.
+- Session grants carry the committed revocation watermark at grant creation.
+  Older revocations cannot erase a newer grant; later matching revocations can.
 - A shared atomic cancellation flag is the only shared mutable runtime state.
   SIGINT/SIGTERM cancel prompts; the reader denies received pending requests,
   closes the group, and services outstanding acknowledgements while the worker
@@ -57,7 +65,8 @@ Filesystem paths stay `PathBuf`/`OsString` through filtering. This schema uses
 UTF-8 text for policy targets: a protected non-UTF-8 event path is denied in
 enforcement mode, recorded with escaped bytes, and never matched or granted
 using lossy decoding. Audit-only mode still allows it. Terminal output escapes
-control and non-ASCII bytes. Non-UTF-8 policy targets require a future schema and
+control and non-ASCII bytes and doubles literal backslashes so distinct byte
+strings have distinct displayed representations. Non-UTF-8 policy targets require a future schema and
 backup-format decision, rather than silently granting the wrong path.
 
 ## Validation and scope

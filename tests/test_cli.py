@@ -82,6 +82,14 @@ class CliTests(unittest.TestCase):
             db.execute("INSERT INTO events(ts,app_id,app_instance,pid,resource,target,decision) VALUES(1234,'legacy','legacy:42',42,'filesystem',CAST(? AS TEXT),'ALLOW')", (b'/old/secret\xff',))
         self.assertIn('/old/secret\\xff', self.run_ctl('trace', 'legacy').stdout)
 
+    def test_trace_distinguishes_literal_escapes_from_control_bytes(self):
+        with sqlite3.connect(self.db) as db:
+            for path in ['/protected/a\nb', '/protected/a\\x0ab']:
+                db.execute("INSERT INTO events(ts,app_id,app_instance,pid,resource,target,decision) "
+                           "VALUES(1234,'app','app:42',42,'filesystem',?,'ALLOW')", (path,))
+        paths = [line.split('\t')[-1] for line in self.run_ctl('trace', 'app').stdout.splitlines()[1:]]
+        self.assertEqual(paths, ['/protected/a\\x0ab', '/protected/a\\\\x0ab'])
+
     def test_unknown_database_version_is_untouched(self):
         with sqlite3.connect(self.db) as db:
             db.execute('PRAGMA user_version=99')
